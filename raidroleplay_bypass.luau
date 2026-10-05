@@ -23,6 +23,12 @@
     PlayerTeaming        (team menu feature)
     F3XShiftTNotDefault  (targeting mode setup; restriction is config-off)
 
+  NOTE (server-side ownership gate):
+    the SERVER still silently refuses syncs on parts whose RRPartOwner
+    tag belongs to another player - this strip only disarms CLIENT
+    guards, so move/resize on foreign parts will silently do nothing.
+    Use tools/f3x/claim_parts.luau (HAVOC_CLAIM) to retag first.
+
   Overrides (set BEFORE running):
     getgenv().HAVOC_RP_EXTRA_REMOVE = {"Name", ...}  -- also strip these
     getgenv().HAVOC_RP_EXTRA_KEEP   = {"Name", ...}  -- never strip these
