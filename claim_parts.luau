@@ -44,6 +44,11 @@
       are skipped, use .players() for bodies). Paced batches; can take a
       while on big maps. After a full sweep other players' own edits on
       those parts silently fail server-side - loud, but that is the point.
+    * v1.5.0 SMARTSYNC: every Sync* the F3X tool sends now pre-claims its parts
+      automatically (namecall hook on the tool's ServerEndpoint: fire claim ->
+      let the tag land -> forward the invoke). Touch any part with any tool
+      and it just works - no manual claiming, ever. Optional IY-style full
+      unlock on join: .autosweep(true) (persists via genv).
 ]]
 
 local genv = (type(getgenv) == "function" and getgenv()) or _G
@@ -247,6 +252,117 @@ function api.world(radius)
   return total, #want
 end
 
+-- ============================================================
+-- SMARTSYNC (v1.5.0): the F3X tool claims parts BY ITSELF.
+-- Wraps __namecall: before any Sync* invoke reaches the tool's
+-- ServerEndpoint, we fire the ownership claim for its parts, give the tag a
+-- beat to land, then forward the invoke. Net effect: touch any part with
+-- F3X -> it becomes yours -> the edit applies. No manual claiming needed.
+-- ============================================================
+local smartState = false
+local smartOld = nil
+local smartCount = 0
+
+local function isToolEndpoint(inst)
+  if typeof(inst) ~= "Instance" or inst.Name ~= "ServerEndpoint" then return false end
+  local a = inst
+  for _ = 1, 6 do
+    if not a then return false end
+    if a.Name == "Building Tools" then return true end
+    a = a.Parent
+  end
+  return false
+end
+
+local function collectParts(v, parts, depth)
+  if depth and depth > 3 then return end
+  if typeof(v) == "Instance" then
+    if v:IsA("BasePart") then parts[#parts + 1] = v end
+    return
+  end
+  if type(v) ~= "table" then return end
+  local p = v.Part
+  if typeof(p) == "Instance" and p:IsA("BasePart") then parts[#parts + 1] = p end
+  for _, x in pairs(v) do
+    if typeof(x) == "Instance" then
+      if x:IsA("BasePart") then parts[#parts + 1] = x end
+    elseif type(x) == "table" then
+      collectParts(x, parts, (depth or 0) + 1)
+    end
+  end
+end
+
+function api.smartsync(on)
+  local desired = (on == nil) and true or (on and true or false)
+  if desired == smartState then return smartState end
+  if smartOld then
+    pcall(function()
+      local mt = getrawmetatable(game)
+      setreadonly(mt, false)
+      mt.__namecall = smartOld
+      setreadonly(mt, true)
+    end)
+    smartOld = nil
+  end
+  smartState = desired
+  if not smartState then return false end
+  local ok = pcall(function()
+    local mt = getrawmetatable(game)
+    smartOld = mt.__namecall
+    setreadonly(mt, false)
+    mt.__namecall = newcclosure(function(self, ...)
+      local method = getnamecallmethod()
+      if method == "InvokeServer" and smartState and isToolEndpoint(self) then
+        local args = { ... }
+        local action = args[1]
+        if type(action) == "string" and string.sub(action, 1, 4) == "Sync" then
+          local parts, seen = {}, {}
+          for i = 2, #args do collectParts(args[i], parts) end
+          local me = lpNow()
+          local want = {}
+          for _, p in ipairs(parts) do
+            if not seen[p] then
+              seen[p] = true
+              local tag = p:FindFirstChild("RRPartOwner")
+              if me and not (tag and tag:IsA("StringValue") and tag.Value == me.Name) then
+                want[#want + 1] = p
+              end
+            end
+          end
+          if #want > 0 then
+            fireClaim(want)
+            smartCount = smartCount + 1
+            task.wait(0.12) -- let the tag land before the invoke
+          end
+        end
+      end
+      return smartOld(self, ...)
+    end)
+    setreadonly(mt, true)
+  end)
+  if not ok then
+    smartState = false
+    return false
+  end
+  return true
+end
+
+-- optional IY-style unlock: claim the ENTIRE workspace shortly after load.
+-- Enable for all future sessions: HAVOC_CLAIM.autosweep(true) (or set
+-- getgenv().HAVOC_CLAIM_AUTOSWEEP = true in autoexec).
+function api.autosweep(on)
+  genv.HAVOC_CLAIM_AUTOSWEEP = on and true or false
+  return genv.HAVOC_CLAIM_AUTOSWEEP
+end
+
+task.spawn(function()
+  if genv.HAVOC_CLAIM_AUTOSWEEP then
+    task.wait(8)
+    local t, n = api.world()
+    print("[claim] auto-sweep: " .. tostring(t) .. "/" .. tostring(n) .. " parts claimed")
+  end
+end)
+
 local autoConn
 function api.auto(on)
   autoState = on and true or false
@@ -315,7 +431,7 @@ function api.watch(on)
 end
 
 function api.status()
-  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState, watchInfo = watchInfo }
+  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState, watchInfo = watchInfo, smart = smartState, smartClaims = smartCount }
 end
 
 -- v1.2.0: arm BOTH - selection-claim (tags the part the moment you click it,
@@ -323,15 +439,16 @@ end
 -- This is what makes normal building replicate again.
 task.spawn(function()
   for _ = 1, 15 do
+    local s = api.smartsync(true)
     local w = api.watch(true)
     local a = api.auto(true)
-    if w and a then
-      print("[claim] edit-watch + selection-claim armed (auto)")
+    if s and w and a then
+      print("[claim] SMARTSYNC + edit-watch + selection-claim armed - f3x self-claims every edit")
       break
     end
     task.wait(2)
   end
 end)
 
-print("[claim] HAVOC_CLAIM v1.4 armed - .sel() | .world() (whole map) | .world(r) | .players(name) | .auto(false) | .watch(false)")
+print("[claim] HAVOC_CLAIM v1.5 armed - .sel() | .world() (whole map) | .players(name) | .smartsync(false) | .autosweep(true)")
 return api
