@@ -39,6 +39,11 @@
       sweeps the map - EVERYTHING in the workspace is editable once claimed
       (the F3X targeting has no character filter, so selecting a player's
       body part + auto-claim = you can move/resize people)
+    * v1.4.0: .world() with NO arguments = claim EVERY part in the workspace
+      (whole-server sweep - retags every player's builds to you; characters
+      are skipped, use .players() for bodies). Paced batches; can take a
+      while on big maps. After a full sweep other players' own edits on
+      those parts silently fail server-side - loud, but that is the point.
 ]]
 
 local genv = (type(getgenv) == "function" and getgenv()) or _G
@@ -199,10 +204,47 @@ function api.players(target)
   return claimFiltered(want)
 end
 
--- sweep everything around you: tags every untagged/foreign part within radius
--- (map props, spawns, other builds - all become editable once claimed)
+-- sweep the workspace: no argument = EVERY part in the workspace; a number =
+-- that radius around you. Characters are skipped (use players() for bodies).
+-- Paced batches + progress prints so big sweeps stay smooth.
 function api.world(radius)
-  return api.near(radius or 600)
+  local me = lpNow()
+  if not me then return 0, 0 end
+  local ref = nil
+  if radius then
+    ref = me.Character and me.Character:GetPivot().Position or Vector3.zero
+  end
+  local want = {}
+  for _, o in ipairs(game.Workspace:GetDescendants()) do
+    if o:IsA("BasePart") then
+      local a = o
+      local isChar = false
+      while a and a ~= game.Workspace do
+        if Players:GetPlayerFromCharacter(a) then isChar = true break end
+        a = a.Parent
+      end
+      if not isChar then
+        if not ref or (o.Position - ref).Magnitude <= radius then
+          local tag = o:FindFirstChild("RRPartOwner")
+          if not (tag and tag:IsA("StringValue") and tag.Value == me.Name) then
+            want[#want + 1] = o
+          end
+        end
+      end
+    end
+  end
+  local total = 0
+  for i = 1, #want, BATCH do
+    local chunk = {}
+    for j = i, math.min(i + BATCH - 1, #want) do chunk[#chunk + 1] = want[j] end
+    total = total + fireClaim(chunk)
+    if i > 1 and ((i - 1) % (BATCH * 20)) == 0 then
+      print("[claim] sweep progress: " .. tostring(i - 1) .. "/" .. tostring(#want))
+    end
+    task.wait(0.08)
+  end
+  api.claimed = api.claimed + total
+  return total, #want
 end
 
 local autoConn
@@ -291,5 +333,5 @@ task.spawn(function()
   end
 end)
 
-print("[claim] HAVOC_CLAIM v1.3 armed - .sel() | .near(r) | .world(r) | .players(name) | .auto(false) | .watch(false)")
+print("[claim] HAVOC_CLAIM v1.4 armed - .sel() | .world() (whole map) | .world(r) | .players(name) | .auto(false) | .watch(false)")
 return api
