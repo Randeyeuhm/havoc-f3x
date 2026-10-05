@@ -47,6 +47,9 @@
     * v1.6.0: .unlock() = classic unlockworkspace - sets Locked=false on
       EVERY part in the workspace (local write + a server-side SetLocked
       sync pass so it sticks). The v1.5 SMARTSYNC experiment is REMOVED.
+    * v1.7.0: .unlockloop(true) (auto-armed) = re-checks every part every
+      1 second and forces Locked=false (local + server mirror only for
+      freshly locked parts; idle ticks cost nothing).
 ]]
 
 local genv = (type(getgenv) == "function" and getgenv()) or _G
@@ -335,6 +338,58 @@ function api.unlock()
   return localN, serverN, #parts
 end
 
+-- ============================================================
+-- UNLOCK LOOP (v1.7.0): every 1 second, force Locked=false on any part
+-- that reports locked. Idle ticks are free (nothing locked -> no work,
+-- no server traffic). Server mirror only for parts not fixed in last 5s.
+-- ============================================================
+local unlockLoopOn = false
+local unlockLoopToken = 0
+local unlockMirror = setmetatable({}, { __mode = "k" })
+
+local function unlockTick()
+  local me = lpNow()
+  if not me then return end
+  local fresh = {}
+  for _, o in ipairs(game.Workspace:GetDescendants()) do
+    if o:IsA("BasePart") then
+      local ok, l = pcall(function() return o.Locked end)
+      if ok and l then
+        pcall(function() o.Locked = false end)
+        local last = unlockMirror[o]
+        if not last or (os.clock() - last) > 5 then
+          unlockMirror[o] = os.clock()
+          fresh[#fresh + 1] = o
+        end
+      end
+    end
+  end
+  if #fresh == 0 then return end
+  local tool = findTool()
+  local se = tool and tool:FindFirstChild("SyncAPI") and tool.SyncAPI:FindFirstChild("ServerEndpoint")
+  if not se then return end
+  for i = 1, #fresh, 50 do
+    local chunk = {}
+    for j = i, math.min(i + 49, #fresh) do chunk[#chunk + 1] = fresh[j] end
+    pcall(function() return se:InvokeServer("SetLocked", chunk, false) end)
+    task.wait(0.05)
+  end
+end
+
+function api.unlockloop(on)
+  unlockLoopOn = (on == nil) and true or (on and true or false)
+  unlockLoopToken = unlockLoopToken + 1
+  if not unlockLoopOn then return false end
+  local myToken = unlockLoopToken
+  task.spawn(function()
+    while unlockLoopOn and unlockLoopToken == myToken do
+      pcall(unlockTick)
+      task.wait(1)
+    end
+  end)
+  return true
+end
+
 local autoConn
 function api.auto(on)
   autoState = on and true or false
@@ -403,7 +458,7 @@ function api.watch(on)
 end
 
 function api.status()
-  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState, watchInfo = watchInfo }
+  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState, watchInfo = watchInfo, loop = unlockLoopOn }
 end
 
 -- v1.2.0: arm BOTH - selection-claim (tags the part the moment you click it,
@@ -421,5 +476,13 @@ task.spawn(function()
   end
 end)
 
-print("[claim] HAVOC_CLAIM v1.6 armed - .unlock() (all Locked=false) | .sel() | .world() | .players(name)")
+-- auto-arm the unlock loop: Locked=false everywhere, checked every second
+task.spawn(function()
+  task.wait(2)
+  if api.unlockloop(true) then
+    print("[claim] unlock loop armed (Locked=false every 1s)")
+  end
+end)
+
+print("[claim] HAVOC_CLAIM v1.7 armed - .unlockloop() (Locked=false every 1s) | .unlock() | .sel() | .players(name)")
 return api
