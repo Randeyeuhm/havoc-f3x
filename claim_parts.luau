@@ -43,7 +43,12 @@ end
 
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
+-- v1.0.1: lazy LocalPlayer (executors can inject before the client joins)
 local lp = Players.LocalPlayer
+local function lpNow()
+  if not lp then lp = Players.LocalPlayer end
+  return lp
+end
 
 local rp = RS:FindFirstChild("raidRoleplay") or RS:FindFirstChild("raidRolePlay")
 local ev = rp and rp:FindFirstChild("Events") and rp.Events:FindFirstChild("EscalateEvent")
@@ -73,11 +78,13 @@ end
 
 -- claim only foreign-tagged parts (untagged = already free, ours = skip)
 local function claimFiltered(parts)
+  local me = lpNow()
+  if not me then return 0, 0 end
   local want = {}
   for _, p in ipairs(parts) do
     if typeof(p) == "Instance" and p:IsA("BasePart") and p:IsDescendantOf(game.Workspace) then
       local tag = p:FindFirstChild("RRPartOwner")
-      if tag and tag:IsA("StringValue") and tag.Value ~= lp.Name then
+      if tag and tag:IsA("StringValue") and tag.Value ~= me.Name then
         want[#want + 1] = p
       end
     end
@@ -99,7 +106,9 @@ function api.parts(list)
 end
 
 local function toolSelection()
-  local btf = game.Workspace:FindFirstChild(lp.Name)
+  local me = lpNow()
+  if not me then return nil end
+  local btf = game.Workspace:FindFirstChild(me.Name)
   btf = btf and btf:FindFirstChild("Building Tools")
   local core = btf and btf:FindFirstChild("Core")
   local selMod = core and core:FindFirstChild("Selection")
@@ -119,12 +128,15 @@ end
 
 function api.near(radius)
   radius = tonumber(radius) or 150
-  local ref = lp.Character and lp.Character:GetPivot().Position or Vector3.zero
+  local me = lpNow()
+  if not me then return 0, 0 end
+  local myName = me.Name
+  local ref = me.Character and me.Character:GetPivot().Position or Vector3.zero
   local out = {}
   for _, o in ipairs(game.Workspace:GetDescendants()) do
     if o:IsA("BasePart") then
       local tag = o:FindFirstChild("RRPartOwner")
-      if tag and tag:IsA("StringValue") and tag.Value ~= lp.Name then
+      if tag and tag:IsA("StringValue") and tag.Value ~= myName then
         local ok, pos = pcall(function() return o.Position end)
         if ok and (pos - ref).Magnitude <= radius then
           out[#out + 1] = o
