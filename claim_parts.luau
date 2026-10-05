@@ -44,11 +44,9 @@
       are skipped, use .players() for bodies). Paced batches; can take a
       while on big maps. After a full sweep other players' own edits on
       those parts silently fail server-side - loud, but that is the point.
-    * v1.5.0 SMARTSYNC: every Sync* the F3X tool sends now pre-claims its parts
-      automatically (namecall hook on the tool's ServerEndpoint: fire claim ->
-      let the tag land -> forward the invoke). Touch any part with any tool
-      and it just works - no manual claiming, ever. Optional IY-style full
-      unlock on join: .autosweep(true) (persists via genv).
+    * v1.6.0: .unlock() = classic unlockworkspace - sets Locked=false on
+      EVERY part in the workspace (local write + a server-side SetLocked
+      sync pass so it sticks). The v1.5 SMARTSYNC experiment is REMOVED.
 ]]
 
 local genv = (type(getgenv) == "function" and getgenv()) or _G
@@ -253,142 +251,89 @@ function api.world(radius)
 end
 
 -- ============================================================
--- SMARTSYNC (v1.5.0): the F3X tool claims parts BY ITSELF.
--- Wraps __namecall: before any Sync* invoke reaches the tool's
--- ServerEndpoint, we fire the ownership claim for its parts, give the tag a
--- beat to land, then forward the invoke. Net effect: touch any part with
--- F3X -> it becomes yours -> the edit applies. No manual claiming needed.
+-- v1.6.0: SMARTSYNC REMOVED. Its namecall hook could stack across reloads
+-- and crash tool syncs on foreign parts, so this one-shot cleaner walks the
+-- __namecall chain, strips any left-over smartsync hooks (identified by
+-- their smartState/smartOld upvalues) and restores the clean chain.
 -- ============================================================
-local smartState = false
-local smartOld = nil
-local smartCount = 0
-local smartForwarding = false
-
-local function isToolEndpoint(inst)
-  if typeof(inst) ~= "Instance" or inst.Name ~= "ServerEndpoint" then return false end
-  local a = inst
-  for _ = 1, 6 do
-    if not a then return false end
-    if a.Name == "Building Tools" then return true end
-    a = a.Parent
+pcall(function()
+  local function upv(fn, i)
+    local ok, name, val = pcall(debug.getupvalue, fn, i)
+    if ok and name ~= nil then return name, val end
+    local ok2, name2, val2 = pcall(getupvalue, fn, i)
+    if ok2 and name2 ~= nil then return name2, val2 end
+    local ok3, tbl = pcall(getupvalues, fn)
+    if ok3 and type(tbl) == "table" then
+      local n, v = nil, nil
+      local idx = 0
+      for k, vv in pairs(tbl) do
+        idx = idx + 1
+        if idx == i then n, v = k, vv break end
+      end
+      return n, v
+    end
+    return nil, nil
   end
-  return false
-end
-
-local function collectParts(v, parts, depth)
-  if depth and depth > 3 then return end
-  if typeof(v) == "Instance" then
-    if v:IsA("BasePart") then parts[#parts + 1] = v end
-    return
-  end
-  if type(v) ~= "table" then return end
-  local p = v.Part
-  if typeof(p) == "Instance" and p:IsA("BasePart") then parts[#parts + 1] = p end
-  for _, x in pairs(v) do
-    if typeof(x) == "Instance" then
-      if x:IsA("BasePart") then parts[#parts + 1] = x end
-    elseif type(x) == "table" then
-      collectParts(x, parts, (depth or 0) + 1)
+  local mt = getrawmetatable(game)
+  local fn = mt.__namecall
+  local hops, changed = 0, false
+  while type(fn) == "function" and hops < 6 do
+    hops = hops + 1
+    local ours, nextFn = false, nil
+    for i = 1, 30 do
+      local name, val = upv(fn, i)
+      if name == nil then break end
+      if name == "smartState" then ours = true end
+      if name == "smartOld" and type(val) == "function" then nextFn = val end
+    end
+    if ours and nextFn then
+      fn = nextFn
+      changed = true
+    else
+      break
     end
   end
-end
-
-function api.smartsync(on)
-  local desired = (on == nil) and true or (on and true or false)
-  if desired == smartState then return smartState end
-  if smartOld then
-    pcall(function()
-      local mt = getrawmetatable(game)
-      setreadonly(mt, false)
-      mt.__namecall = smartOld
-      setreadonly(mt, true)
-    end)
-    smartOld = nil
-    genv.HAVOC_CLAIM_SMART_OLD = nil
-  end
-  -- a previous HAVOC instance may still have its hook installed (reload):
-  -- drop it before wrapping so we never stack our own hooks
-  local prevHook = genv.HAVOC_CLAIM_SMART_OLD
-  if prevHook then
-    pcall(function()
-      local mt = getrawmetatable(game)
-      setreadonly(mt, false)
-      mt.__namecall = prevHook
-      setreadonly(mt, true)
-    end)
-    genv.HAVOC_CLAIM_SMART_OLD = nil
-  end
-  smartState = desired
-  if not smartState then return false end
-  local ok = pcall(function()
-    local mt = getrawmetatable(game)
-    smartOld = mt.__namecall
-    genv.HAVOC_CLAIM_SMART_OLD = smartOld
+  if changed then
     setreadonly(mt, false)
-    mt.__namecall = newcclosure(function(self, ...)
-      local method = getnamecallmethod()
-      if method == "InvokeServer" and smartState and not smartForwarding and isToolEndpoint(self) then
-        local args = { ... }
-        local action = args[1]
-        if type(action) == "string" and string.sub(action, 1, 4) == "Sync" then
-          local parts, seen = {}, {}
-          for i = 2, #args do collectParts(args[i], parts) end
-          local me = lpNow()
-          local want = {}
-          for _, p in ipairs(parts) do
-            if not seen[p] then
-              seen[p] = true
-              local tag = p:FindFirstChild("RRPartOwner")
-              if me and not (tag and tag:IsA("StringValue") and tag.Value == me.Name) then
-                want[#want + 1] = p
-              end
-            end
-          end
-          if #want > 0 then
-            fireClaim(want)
-            smartCount = smartCount + 1
-            task.wait(0.12) -- let the tag land before the invoke
-            -- RE-ISSUE the invoke as a real namecall: the claim above is itself
-            -- a namecall (FireServer), which leaves the executor's method
-            -- context stale - a plain function-forward would replay as FireServer
-            smartForwarding = true
-            local packed = table.pack(pcall(function()
-              return self:InvokeServer(table.unpack(args))
-            end))
-            smartForwarding = false
-            if packed[1] then
-              return table.unpack(packed, 2, packed.n)
-            end
-            return nil
-          end
-        end
-      end
-      return smartOld(self, ...)
-    end)
+    mt.__namecall = fn
     setreadonly(mt, true)
-  end)
-  if not ok then
-    smartState = false
-    return false
-  end
-  return true
-end
-
--- optional IY-style unlock: claim the ENTIRE workspace shortly after load.
--- Enable for all future sessions: HAVOC_CLAIM.autosweep(true) (or set
--- getgenv().HAVOC_CLAIM_AUTOSWEEP = true in autoexec).
-function api.autosweep(on)
-  genv.HAVOC_CLAIM_AUTOSWEEP = on and true or false
-  return genv.HAVOC_CLAIM_AUTOSWEEP
-end
-
-task.spawn(function()
-  if genv.HAVOC_CLAIM_AUTOSWEEP then
-    task.wait(8)
-    local t, n = api.world()
-    print("[claim] auto-sweep: " .. tostring(t) .. "/" .. tostring(n) .. " parts claimed")
+    genv.HAVOC_CLAIM_SMART_OLD = nil
+    print("[claim] removed stale smartsync hook(s) - chain clean")
   end
 end)
+
+-- ============================================================
+-- UNLOCK (classic unlockworkspace): Locked = false on EVERY part in the
+-- workspace. Local pass (client view + client-side tool checks) plus a
+-- server-side SetLocked sync pass (so it sticks for the server gate too).
+-- Call: HAVOC_CLAIM.unlock()
+-- ============================================================
+function api.unlock()
+  local me = lpNow()
+  if not me then return 0, 0, 0 end
+  local parts = {}
+  for _, o in ipairs(game.Workspace:GetDescendants()) do
+    if o:IsA("BasePart") then parts[#parts + 1] = o end
+  end
+  local localN = 0
+  for _, p in ipairs(parts) do
+    if pcall(function() p.Locked = false end) then localN = localN + 1 end
+  end
+  local serverN = 0
+  local tool = findTool()
+  local se = tool and tool:FindFirstChild("SyncAPI") and tool.SyncAPI:FindFirstChild("ServerEndpoint")
+  if se then
+    for i = 1, #parts, BATCH do
+      local chunk = {}
+      for j = i, math.min(i + BATCH - 1, #parts) do chunk[#chunk + 1] = parts[j] end
+      if pcall(function() return se:InvokeServer("SetLocked", chunk, false) end) then
+        serverN = serverN + #chunk
+      end
+      task.wait(0.08)
+    end
+  end
+  return localN, serverN, #parts
+end
 
 local autoConn
 function api.auto(on)
@@ -458,7 +403,7 @@ function api.watch(on)
 end
 
 function api.status()
-  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState, watchInfo = watchInfo, smart = smartState, smartClaims = smartCount }
+  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState, watchInfo = watchInfo }
 end
 
 -- v1.2.0: arm BOTH - selection-claim (tags the part the moment you click it,
@@ -466,16 +411,15 @@ end
 -- This is what makes normal building replicate again.
 task.spawn(function()
   for _ = 1, 15 do
-    local s = api.smartsync(true)
     local w = api.watch(true)
     local a = api.auto(true)
-    if s and w and a then
-      print("[claim] SMARTSYNC + edit-watch + selection-claim armed - f3x self-claims every edit")
+    if w and a then
+      print("[claim] edit-watch + selection-claim armed")
       break
     end
     task.wait(2)
   end
 end)
 
-print("[claim] HAVOC_CLAIM v1.5 armed - .sel() | .world() (whole map) | .players(name) | .smartsync(false) | .autosweep(true)")
+print("[claim] HAVOC_CLAIM v1.6 armed - .unlock() (all Locked=false) | .sel() | .world() | .players(name)")
 return api
