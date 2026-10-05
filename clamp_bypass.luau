@@ -48,29 +48,50 @@ local okAll, err = pcall(function()
   end
   out.targets = #targets
   if #targets == 0 then error("clamp modules not found (already bypassed or not loaded?)") end
-  local gc = getgc(true)
   local store = {}
-  for _, t in ipairs(targets) do
-    local hits = 0
-    for _, o in ipairs(gc) do
-      if type(o) == "table" then
-        local n = #o
-        if n > 0 and n < 50 then
-          for i = 1, n do
-            if rawequal(o[i], t.fn) then
-              store[#store + 1] = { arr = o, idx = i, fn = t.fn }
-              local ok2 = pcall(table.remove, o, i)
-              out.removed[#out.removed + 1] = t.name .. (ok2 and (" removed@" .. i) or " REMOVE-FAIL")
-              hits = hits + 1
-              break
+  local killed = {}
+
+  -- one full removal pass over the CURRENT gc (arrays are created at first
+  -- tool equip - re-fetch every pass so late arrays are caught)
+  local function pass()
+    local gc = getgc(true)
+    local n = 0
+    for _, t in ipairs(targets) do
+      local hits = 0
+      for _, o in ipairs(gc) do
+        if type(o) == "table" then
+          local len = #o
+          if len > 0 and len < 50 then
+            for i = 1, len do
+              if rawequal(o[i], t.fn) then
+                store[#store + 1] = { arr = o, idx = i, fn = t.fn }
+                local ok2 = pcall(table.remove, o, i)
+                out.removed[#out.removed + 1] = t.name .. (ok2 and (" removed@" .. i) or " REMOVE-FAIL")
+                hits = hits + 1
+                n = n + 1
+                break
+              end
             end
           end
         end
       end
+      if hits > 0 then killed[t.name] = true end
+      out[t.name .. "_arrays"] = (out[t.name .. "_arrays"] or 0) + hits
     end
-    out[t.name .. "_arrays"] = hits
+    return n
   end
-  genv.HAVOC_CLAMP_KILL = { store = store, at = os.time() }
+
+  local first = pass()
+  out.firstPass = first
+
+  -- idempotent restore store: MERGE with any previous run (never wipe it)
+  local prev = genv.HAVOC_CLAMP_KILL
+  local merged = {}
+  if type(prev) == "table" and type(prev.store) == "table" then
+    for _, s in ipairs(prev.store) do merged[#merged + 1] = s end
+  end
+  for _, s in ipairs(store) do merged[#merged + 1] = s end
+  genv.HAVOC_CLAMP_KILL = { store = merged, at = os.time() }
   function genv.HAVOC_CLAMP_RESTORE()
     local n = 0
     for _, s in ipairs(genv.HAVOC_CLAMP_KILL.store or {}) do
@@ -78,6 +99,20 @@ local okAll, err = pcall(function()
     end
     return n
   end
+
+  -- finisher: if a target was never found (arrays don't exist until the tool
+  -- is first equipped), keep re-scanning for up to ~60s
+  task.spawn(function()
+    for _ = 1, 20 do
+      local pending = false
+      for _, t in ipairs(targets) do
+        if not killed[t.name] then pending = true end
+      end
+      if not pending then break end
+      task.wait(3)
+      pass()
+    end
+  end)
 end)
 out.ok = okAll
 out.err = okAll and nil or tostring(err)
