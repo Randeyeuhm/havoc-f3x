@@ -35,6 +35,10 @@
       refuses syncs on untagged/foreign parts - so claim before/while editing.
       watch() (auto-armed) claims the parts of every edit you make.
     * re-run after every rejoin (autoexec loads it in F3X games)
+    * v1.3.0: .players(name) claims a player's whole character and .world(r)
+      sweeps the map - EVERYTHING in the workspace is editable once claimed
+      (the F3X targeting has no character filter, so selecting a player's
+      body part + auto-claim = you can move/resize people)
 ]]
 
 local genv = (type(getgenv) == "function" and getgenv()) or _G
@@ -172,6 +176,35 @@ function api.near(radius)
   return claimFiltered(out)
 end
 
+-- claim a player's entire character (all BaseParts) - characters carry no
+-- ownership tags, so without this every sync op on them is refused server-side
+function api.players(target)
+  local want = {}
+  local function addChar(plr)
+    if not plr or not plr.Character then return end
+    for _, o in ipairs(plr.Character:GetDescendants()) do
+      if o:IsA("BasePart") then want[#want + 1] = o end
+    end
+  end
+  if target == nil then
+    local me = lpNow()
+    for _, plr in ipairs(Players:GetPlayers()) do
+      if plr ~= me then addChar(plr) end
+    end
+  elseif type(target) == "string" then
+    addChar(Players:FindFirstChild(target))
+  elseif typeof(target) == "Instance" and target:IsA("Player") then
+    addChar(target)
+  end
+  return claimFiltered(want)
+end
+
+-- sweep everything around you: tags every untagged/foreign part within radius
+-- (map props, spawns, other builds - all become editable once claimed)
+function api.world(radius)
+  return api.near(radius or 600)
+end
+
 local autoConn
 function api.auto(on)
   autoState = on and true or false
@@ -258,5 +291,5 @@ task.spawn(function()
   end
 end)
 
-print("[claim] HAVOC_CLAIM v1.2 armed - .sel() | .near(r) | .auto(false) | .watch(false)")
+print("[claim] HAVOC_CLAIM v1.3 armed - .sel() | .near(r) | .world(r) | .players(name) | .auto(false) | .watch(false)")
 return api
