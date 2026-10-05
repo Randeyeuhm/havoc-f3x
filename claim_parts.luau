@@ -50,6 +50,13 @@
     * v1.7.0: .unlockloop(true) (auto-armed) = re-checks every part every
       1 second and forces Locked=false (local + server mirror only for
       freshly locked parts; idle ticks cost nothing).
+    * v1.8.0: RESURRECTION WATCHER - the "Building Tools" tool (and the
+      Selection/History modules our hooks bind to) is re-cloned on every
+      respawn, which silently killed selection-claim + edit-watch until
+      you re-executed. A 2s watcher now detects the new tool instance and
+      re-arms both connections automatically, forever. This is what makes
+      tools keep working for a whole session (especially one-shot tools
+      like Mesh/Texture whose sync does not retry).
 ]]
 
 local genv = (type(getgenv) == "function" and getgenv()) or _G
@@ -484,5 +491,27 @@ task.spawn(function()
   end
 end)
 
-print("[claim] HAVOC_CLAIM v1.7 armed - .unlockloop() (Locked=false every 1s) | .unlock() | .sel() | .players(name)")
+-- v1.8.0: RESURRECTION WATCHER.
+-- The "Building Tools" instance is re-cloned on every respawn/rejoin; the
+-- Selection/History modules our hooks were connected to belong to the OLD
+-- clone, so selection-claim + edit-watch silently died after the first
+-- death and never came back. This watches for the current tool instance
+-- and re-arms both hooks against it, forever.
+local armedToolRef = nil
+task.spawn(function()
+  while true do
+    task.wait(2)
+    local okTool, t = pcall(findTool)
+    if okTool and t and t ~= armedToolRef then
+      armedToolRef = t
+      local okAuto = pcall(function() return api.auto(true) end)
+      local okWatch = pcall(function() return api.watch(true) end)
+      if okAuto or okWatch then
+        print("[claim] (re)armed selection-claim + edit-watch on " .. t:GetFullName())
+      end
+    end
+  end
+end)
+
+print("[claim] HAVOC_CLAIM v1.8 armed - resurrection watcher active | .unlockloop() | .unlock() | .sel() | .players(name)")
 return api

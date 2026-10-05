@@ -10,7 +10,12 @@
          and keeps logs/sets/teams
     2. claim_parts.luau
          HAVOC_CLAIM - ownership claiming + auto-claim on select/edit +
-         Locked=false unlock loop (everything self-arms)
+         Locked=false unlock loop + resurrection watcher (all self-arms)
+    3. tool_fixer.luau
+         wraps the framework sync dispatcher so MESH/TEXTURE tools create
+         their needed child instances on demand (works on any part, no
+         "+ Add" needed) and mirror the create to the server; also turns
+         the locked-part sync gate off
 
   Use:
       loadstring(readfile("havoc_db/f3x_patch.luau"))()
@@ -19,6 +24,7 @@
   Status after load:
       getgenv().HAVOC_RP_BYPASS   - strip result
       getgenv().HAVOC_CLAIM       - claim tool (auto/watch/loop armed)
+      getgenv().HAVOC_F3X_FIX     - tool fixer (patched/hits/created/last)
 ]]
 
 -- 1) raidRolePlay clamp strip
@@ -31,6 +37,11 @@ local okClaim = pcall(function()
   return loadstring(readfile("havoc_db/claim_parts.luau"))()
 end)
 
-print("[f3x_patch] loaded (strip=" .. tostring(okStrip) .. " claim=" .. tostring(okClaim) .. ")")
+-- 3) child-instance tool fixer (mesh/texture auto-create + locked gate off)
+local okFix = pcall(function()
+  return loadstring(readfile("havoc_db/f3x_toolfix.luau"))()
+end)
 
-return { strip = okStrip, claim = okClaim }
+print("[f3x_patch] loaded (strip=" .. tostring(okStrip) .. " claim=" .. tostring(okClaim) .. " toolfix=" .. tostring(okFix) .. ")")
+
+return { strip = okStrip, claim = okClaim, toolfix = okFix }
