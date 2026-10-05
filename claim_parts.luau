@@ -63,6 +63,7 @@ end
 local BATCH = 50
 local autoState = false
 local watchState = false
+local watchInfo = nil
 local api = { active = true, claimed = 0, batches = 0 }
 genv.HAVOC_CLAIM = api
 
@@ -187,22 +188,45 @@ function api.auto(on)
 end
 
 local historyConn
+
+-- the tool's own Core does NOT expose historyUnpack - the raidRolePlay
+-- Assets.Core module does (that is what the game's own callbacks use)
+local function resolveUnpacker(tool)
+  local ok1, c1 = pcall(function() return require(tool.Core) end)
+  if ok1 and type(c1) == "table" and type(c1.historyUnpack) == "function" then
+    return c1, "tool"
+  end
+  local rp = game.ReplicatedStorage:FindFirstChild("raidRoleplay") or game.ReplicatedStorage:FindFirstChild("raidRolePlay")
+  local ac = rp and rp:FindFirstChild("Assets") and rp.Assets:FindFirstChild("Core")
+  if ac then
+    local ok2, c2 = pcall(function() return require(ac) end)
+    if ok2 and type(c2) == "table" and type(c2.historyUnpack) == "function" then
+      return c2, "raidroleplay"
+    end
+  end
+  return nil
+end
+
 function api.watch(on)
   watchState = (on == nil) and true or (on and true or false)
+  watchInfo = nil
   if historyConn then historyConn:Disconnect() historyConn = nil end
   if not watchState then return false end
   local tool = findTool()
   if not tool then return false end
-  local histMod = tool.Core:FindFirstChild("History")
+  local core = tool:FindFirstChild("Core")
+  local histMod = core and core:FindFirstChild("History")
   if not histMod then return false end
-  local okC, core = pcall(require, tool.Core)
+  local unpacker, src = resolveUnpacker(tool)
+  if not unpacker then return false end
   local okH, hist = pcall(function() return require(histMod) end)
-  if not (okC and okH) or type(core) ~= "table" or type(hist) ~= "table" then return false end
+  if not okH or type(hist) ~= "table" or not hist.Changed then return false end
+  watchInfo = "unpacker=" .. src .. " | hist=" .. histMod:GetFullName()
   historyConn = hist.Changed:Connect(function()
     pcall(function()
       local entry = hist.Stack[hist.Index]
       if entry == nil then return end
-      local _, _, parts = core.historyUnpack(entry)
+      local _, _, parts = unpacker.historyUnpack(entry)
       if type(parts) ~= "table" then parts = entry.Parts end
       if type(parts) ~= "table" then return end
       local list = {}
@@ -216,20 +240,23 @@ function api.watch(on)
 end
 
 function api.status()
-  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState }
+  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState, watchInfo = watchInfo }
 end
 
--- auto-arm the history WATCH: every edit re-claims its parts, so the server
--- stops silently refusing your syncs (fixes the "ghost build" problem)
+-- v1.2.0: arm BOTH - selection-claim (tags the part the moment you click it,
+-- before the edit sync) + edit-watch (re-claims after every history entry).
+-- This is what makes normal building replicate again.
 task.spawn(function()
   for _ = 1, 15 do
-    if api.watch(true) then
-      print("[claim] edit-watch armed (auto-claims parts you touch)")
+    local w = api.watch(true)
+    local a = api.auto(true)
+    if w and a then
+      print("[claim] edit-watch + selection-claim armed (auto)")
       break
     end
     task.wait(2)
   end
 end)
 
-print("[claim] HAVOC_CLAIM armed - select parts then HAVOC_CLAIM.sel() | .near(r) | .auto(true) | .watch()")
+print("[claim] HAVOC_CLAIM v1.2 armed - .sel() | .near(r) | .auto(false) | .watch(false)")
 return api
