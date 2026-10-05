@@ -30,8 +30,10 @@
 
   NOTES:
     * claiming RETAGS the part (the original owner silently loses it)
-    * untagged parts need no claim — the server allows everyone
-    * only foreign-TAGGED parts are touched (no tag spam)
+    * v1.1.0: also claims UNTAGGED parts. After our rp_bypass strip, parts
+      your client creates no longer get auto-tagged, and the server silently
+      refuses syncs on untagged/foreign parts - so claim before/while editing.
+      watch() (auto-armed) claims the parts of every edit you make.
     * re-run after every rejoin (autoexec loads it in F3X games)
 ]]
 
@@ -60,6 +62,7 @@ end
 
 local BATCH = 50
 local autoState = false
+local watchState = false
 local api = { active = true, claimed = 0, batches = 0 }
 genv.HAVOC_CLAIM = api
 
@@ -76,7 +79,9 @@ local function fireClaim(list)
   return #list
 end
 
--- claim only foreign-tagged parts (untagged = already free, ours = skip)
+-- claim anything not already owned by us: foreign-tagged AND untagged parts.
+-- (untagged = "ghost" parts - the server refuses syncs on them because our
+-- strip removed the game's auto-tag-on-create escalation)
 local function claimFiltered(parts)
   local me = lpNow()
   if not me then return 0, 0 end
@@ -84,7 +89,7 @@ local function claimFiltered(parts)
   for _, p in ipairs(parts) do
     if typeof(p) == "Instance" and p:IsA("BasePart") and p:IsDescendantOf(game.Workspace) then
       local tag = p:FindFirstChild("RRPartOwner")
-      if tag and tag:IsA("StringValue") and tag.Value ~= me.Name then
+      if not (tag and tag:IsA("StringValue") and tag.Value == me.Name) then
         want[#want + 1] = p
       end
     end
@@ -105,12 +110,30 @@ function api.parts(list)
   return claimFiltered(list or {})
 end
 
-local function toolSelection()
+-- locate the F3X tool wherever it lives (workspace runtime folder, character,
+-- or backpack). The workspace folder shares the player's name with the
+-- character model, so scan for Folder type explicitly.
+local function findTool()
   local me = lpNow()
   if not me then return nil end
-  local btf = game.Workspace:FindFirstChild(me.Name)
-  btf = btf and btf:FindFirstChild("Building Tools")
-  local core = btf and btf:FindFirstChild("Core")
+  for _, c in ipairs(game.Workspace:GetChildren()) do
+    if c:IsA("Folder") and c.Name == me.Name then
+      local bt = c:FindFirstChild("Building Tools")
+      if bt and bt:FindFirstChild("Core") then return bt end
+    end
+  end
+  local ch = me.Character
+  local t2 = ch and ch:FindFirstChild("Building Tools")
+  if t2 and t2:FindFirstChild("Core") then return t2 end
+  local bp = me:FindFirstChildOfClass("Backpack")
+  local t3 = bp and bp:FindFirstChild("Building Tools")
+  if t3 and t3:FindFirstChild("Core") then return t3 end
+  return nil
+end
+
+local function toolSelection()
+  local tool = findTool()
+  local core = tool and tool:FindFirstChild("Core")
   local selMod = core and core:FindFirstChild("Selection")
   if not selMod then return nil end
   local ok, sel = pcall(require, selMod)
@@ -163,9 +186,50 @@ function api.auto(on)
   return true
 end
 
-function api.status()
-  return { claimed = api.claimed, batches = api.batches, auto = autoState }
+local historyConn
+function api.watch(on)
+  watchState = (on == nil) and true or (on and true or false)
+  if historyConn then historyConn:Disconnect() historyConn = nil end
+  if not watchState then return false end
+  local tool = findTool()
+  if not tool then return false end
+  local histMod = tool.Core:FindFirstChild("History")
+  if not histMod then return false end
+  local okC, core = pcall(require, tool.Core)
+  local okH, hist = pcall(function() return require(histMod) end)
+  if not (okC and okH) or type(core) ~= "table" or type(hist) ~= "table" then return false end
+  historyConn = hist.Changed:Connect(function()
+    pcall(function()
+      local entry = hist.Stack[hist.Index]
+      if entry == nil then return end
+      local _, _, parts = core.historyUnpack(entry)
+      if type(parts) ~= "table" then parts = entry.Parts end
+      if type(parts) ~= "table" then return end
+      local list = {}
+      for _, v in pairs(parts) do
+        if typeof(v) == "Instance" then list[#list + 1] = v end
+      end
+      if #list > 0 then claimFiltered(list) end
+    end)
+  end)
+  return true
 end
 
-print("[claim] HAVOC_CLAIM armed - select parts then HAVOC_CLAIM.sel() | .near(r) | .auto(true)")
+function api.status()
+  return { claimed = api.claimed, batches = api.batches, auto = autoState, watch = watchState }
+end
+
+-- auto-arm the history WATCH: every edit re-claims its parts, so the server
+-- stops silently refusing your syncs (fixes the "ghost build" problem)
+task.spawn(function()
+  for _ = 1, 15 do
+    if api.watch(true) then
+      print("[claim] edit-watch armed (auto-claims parts you touch)")
+      break
+    end
+    task.wait(2)
+  end
+end)
+
+print("[claim] HAVOC_CLAIM armed - select parts then HAVOC_CLAIM.sel() | .near(r) | .auto(true) | .watch()")
 return api
