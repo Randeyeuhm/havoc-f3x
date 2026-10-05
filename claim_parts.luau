@@ -54,7 +54,8 @@ if not (ev and poMod) then
 end
 
 local BATCH = 50
-local api = { active = true, claimed = 0, batches = 0, auto = false }
+local autoState = false
+local api = { active = true, claimed = 0, batches = 0 }
 genv.HAVOC_CLAIM = api
 
 local function fireClaim(list)
@@ -137,11 +138,11 @@ end
 
 local autoConn
 function api.auto(on)
-  api.auto = on and true or false
+  autoState = on and true or false
   if autoConn then autoConn:Disconnect() autoConn = nil end
-  if not api.auto then return false end
+  if not autoState then return false end
   local sel = toolSelection()
-  if not sel then api.auto = false return false end
+  if not sel then autoState = false return false end
   autoConn = sel.Changed:Connect(function()
     local parts = {}
     for _, p in pairs(sel.Parts or {}) do parts[#parts + 1] = p end
@@ -151,7 +152,7 @@ function api.auto(on)
 end
 
 function api.status()
-  return { claimed = api.claimed, batches = api.batches, auto = api.auto }
+  return { claimed = api.claimed, batches = api.batches, auto = autoState }
 end
 
 print("[claim] HAVOC_CLAIM armed - select parts then HAVOC_CLAIM.sel() | .near(r) | .auto(true)")
