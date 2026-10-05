@@ -262,6 +262,7 @@ end
 local smartState = false
 local smartOld = nil
 local smartCount = 0
+local smartForwarding = false
 
 local function isToolEndpoint(inst)
   if typeof(inst) ~= "Instance" or inst.Name ~= "ServerEndpoint" then return false end
@@ -303,16 +304,30 @@ function api.smartsync(on)
       setreadonly(mt, true)
     end)
     smartOld = nil
+    genv.HAVOC_CLAIM_SMART_OLD = nil
+  end
+  -- a previous HAVOC instance may still have its hook installed (reload):
+  -- drop it before wrapping so we never stack our own hooks
+  local prevHook = genv.HAVOC_CLAIM_SMART_OLD
+  if prevHook then
+    pcall(function()
+      local mt = getrawmetatable(game)
+      setreadonly(mt, false)
+      mt.__namecall = prevHook
+      setreadonly(mt, true)
+    end)
+    genv.HAVOC_CLAIM_SMART_OLD = nil
   end
   smartState = desired
   if not smartState then return false end
   local ok = pcall(function()
     local mt = getrawmetatable(game)
     smartOld = mt.__namecall
+    genv.HAVOC_CLAIM_SMART_OLD = smartOld
     setreadonly(mt, false)
     mt.__namecall = newcclosure(function(self, ...)
       local method = getnamecallmethod()
-      if method == "InvokeServer" and smartState and isToolEndpoint(self) then
+      if method == "InvokeServer" and smartState and not smartForwarding and isToolEndpoint(self) then
         local args = { ... }
         local action = args[1]
         if type(action) == "string" and string.sub(action, 1, 4) == "Sync" then
@@ -333,6 +348,18 @@ function api.smartsync(on)
             fireClaim(want)
             smartCount = smartCount + 1
             task.wait(0.12) -- let the tag land before the invoke
+            -- RE-ISSUE the invoke as a real namecall: the claim above is itself
+            -- a namecall (FireServer), which leaves the executor's method
+            -- context stale - a plain function-forward would replay as FireServer
+            smartForwarding = true
+            local packed = table.pack(pcall(function()
+              return self:InvokeServer(table.unpack(args))
+            end))
+            smartForwarding = false
+            if packed[1] then
+              return table.unpack(packed, 2, packed.n)
+            end
+            return nil
           end
         end
       end
